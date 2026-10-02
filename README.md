@@ -10,7 +10,7 @@
 
 A **Aurora Agro** (nome fictício) processa o desligamento de colaboradores através de um chamado aberto pelo RH na plataforma de Service Desk (Desk Manager). Antes desta automação, o bloqueio de acessos — Active Directory, e-mail, VPN, sistemas internos — dependia de um analista de TI executar cada passo manualmente após ler o chamado, com tempo de resposta variável e sujeito a esquecimento.
 
-**Objetivo:** transformar a abertura do chamado de Desligamento em um gatilho que bloqueia automaticamente o acesso do colaborador, sem intervenção humana, mantendo total auditabilidade.
+**Objetivo:** transformar a abertura do chamado de Desligamento em um gatilho que bloqueia automaticamente o acesso do colaborador, sem intervenção humana, mantendo total auditabilidade — e, 60 dias depois, arquivar a conta numa OU de Inativos.
 
 ## Arquitetura
 
@@ -38,10 +38,34 @@ A **Aurora Agro** (nome fictício) processa o desligamento de colaboradores atra
 | **Fluxo iPaaS (low-code)** | Disparado por webhook na abertura do chamado; roteia para o grupo responsável e gera um checklist informativo na interação |
 | **Agente on-premises (PowerShell)** | Consulta a API do Service Desk, localiza chamados pendentes, resolve o colaborador via matrícula (`EmployeeID`), executa `Disable-ADAccount`, registra o resultado de volta no chamado |
 | **Entra Connect** | Sincroniza a desativação do AD para o Entra ID automaticamente — nenhuma chamada à Graph API foi necessária |
+| **Rotina de Inativos (PowerShell)** | Segunda tarefa agendada, diária: move para a OU de Inativos as contas desabilitadas há mais de 60 dias, usando o carimbo gravado no momento do bloqueio |
 
 ### Correlação de identidade
 
 A matrícula do colaborador (campo já preenchido no chamado pelo RH) é usada como chave de correlação com o atributo `EmployeeID` no Active Directory — evitando qualquer dependência de nome ou e-mail, que podem ter variações/duplicidade.
+
+## Ciclo de vida: arquivamento após 60 dias
+
+O bloqueio não é o fim do ciclo. Para saber *quando* uma conta completou 60 dias de desligada sem depender do histórico do Service Desk, o agente grava um **carimbo na própria conta** no momento do bloqueio (atributo de texto livre `info`):
+
+```
+[OFFBOARDING-AUTO] 2026-10-02 chamado=0000-000000
+```
+
+Uma segunda tarefa agendada, diária, faz a varredura:
+
+1. Lista contas **desabilitadas** na árvore de colaboradores que tenham o carimbo;
+2. Seleciona as com 60 dias ou mais desde a data do carimbo;
+3. Move cada uma para a OU de Inativos e registra a ação em log.
+
+Salvaguardas de projeto:
+
+- **Simulação por padrão** — sem o parâmetro de execução, o script apenas lista o que moveria;
+- **Nunca move conta habilitada** (ex.: colaborador recontratado);
+- Só considera contas com o carimbo da automação — contas bloqueadas manualmente ficam de fora;
+- Parâmetros de teste (`-Dias`, `-SomenteMatricula`) permitem validar em uma única conta sem risco para as demais.
+
+**Decisão de projeto — OU de Inativos fora do escopo do Entra Connect.** Ao mover a conta para uma OU não sincronizada, o Entra Connect a trata como removida: ela vai para a lixeira do Entra ID (restaurável por 30 dias) e depois é excluída em definitivo, liberando a licença. Isso foi **validado em teste**. Consequência operacional: caixa de e-mail e OneDrive existem por cerca de 90 dias após o desligamento (60 + 30), e qualquer política de retenção precisa agir dentro dessa janela.
 
 ## Modelo de segurança
 
@@ -49,7 +73,8 @@ Um dos pontos centrais do projeto foi garantir que a automação rodasse com o *
 
 - Conta de serviço dedicada, **sem** associação a grupos administrativos amplos (removida de Domain Admins durante o hardening)
 - Delegação de permissão granular via ACL do AD, restrita a:
-  - `WriteProperty` (habilitar/desabilitar conta) e `ReadProperty` (ler o atributo de matrícula) — nada além disso
+  - `WriteProperty` (habilitar/desabilitar conta e gravar o carimbo) e `ReadProperty` (ler o atributo de matrícula) — nada além disso
+  - Para o arquivamento, somente duas permissões a mais: `CreateChild` (objetos *user*) na OU de Inativos e `DeleteChild` (objetos *user*) nas OUs de origem
   - Escopo limitado às Unidades Organizacionais (OUs) onde efetivamente existem contas de colaboradores
 - Toda ação (sucesso ou falha) é registrada como comentário no próprio chamado, com timestamp e conta afetada — auditoria nativa, sem sistema de log adicional
 
@@ -72,6 +97,7 @@ Esse projeto envolveu bem mais troubleshooting de infraestrutura do que o espera
 - Tempo de bloqueio de acesso: de horas/dias (processo manual) para **< 5 minutos** (ciclo do agente + sincronização do Entra Connect)
 - Zero intervenção manual no caminho feliz (chamado aberto → acesso bloqueado → chamado encerrado, tudo automático)
 - Rastreabilidade completa: todo bloqueio (ou falha) fica documentado no próprio chamado
+- Ciclo completo sem toque manual: bloqueio em minutos e arquivamento da conta aos 60 dias
 - Superfície de ataque mínima: conta de serviço sem privilégios administrativos, permissões delegadas e auditadas
 
 ## Stack
