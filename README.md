@@ -44,6 +44,13 @@ A **Aurora Agro** (nome fictício) processa o desligamento de colaboradores atra
 
 A matrícula do colaborador (campo já preenchido no chamado pelo RH) é usada como chave de correlação com o atributo `EmployeeID` no Active Directory — evitando qualquer dependência de nome ou e-mail, que podem ter variações/duplicidade.
 
+### Roteamento por categoria e tratamento de falhas
+
+- **Categoria de acessos (segurança):** o orquestrador (Maestro) encaminha o chamado ao time de Segurança da Informação com o checklist; o agente on-prem bloqueia a conta, carimba a data e encerra o chamado.
+- **Categoria de sistemas:** o chamado é apenas direcionado ao time de Sistemas (Nível 1), que trata e encerra manualmente. O agente de bloqueio ignora esses chamados, pois só enxerga os que estão em Andamento no grupo de Segurança.
+- **Matrícula não encontrada, duplicada ou inválida:** nada é bloqueado. O chamado permanece em *Andamento* com o motivo registrado, e um e-mail de alerta (título `[Desligamento de Usuário] Ação manual necessária - chamado <número>`) é enviado à equipe de infraestrutura via Microsoft Graph, a partir de um segundo Maestro.
+- **Matrícula com zeros à esquerda:** a busca no AD aceita as variantes (ex.: `1652` no chamado e `01652` no AD) e só prossegue se houver exatamente uma conta correspondente.
+
 ## Ciclo de vida: arquivamento após 60 dias
 
 O bloqueio não é o fim do ciclo. Para saber *quando* uma conta completou 60 dias de desligada sem depender do histórico do Service Desk, o agente grava um **carimbo na própria conta** no momento do bloqueio (atributo de texto livre `info`):
@@ -91,6 +98,10 @@ Esse projeto envolveu bem mais troubleshooting de infraestrutura do que o espera
 4. **Comportamento não-documentado do roteamento por grupo na plataforma iPaaS.** O campo de transferência de grupo na API era, na prática, ignorado — o grupo resultante da interação era sempre determinado pela identidade (e o grupo principal) do operador autenticado que executava a chamada, não pelo valor enviado no payload. Resolvido escolhendo uma credencial de automação cujo grupo principal já era o grupo de destino correto.
 
 5. **Inconsistência entre múltiplos Domain Controllers.** Em um ambiente com 5 DCs, criar uma ACE em um DC e validá-la consultando outro (sem replicação ainda concluída) fez a alteração "sumir" temporariamente — resolvido fixando um DC único durante toda a fase de criação/validação, seguido de `repadmin /syncall` para propagar globalmente.
+
+6. **Nomes com acento derrubavam o registro do resultado.** Ao gravar a interação no chamado, o corpo JSON era enviado como string simples; nomes com "Ç" ou acentos geravam erro 500 na API, e o ciclo terminava sem comentário nem alerta. Solução: enviar o corpo em bytes UTF-8 com `charset=utf-8` e isolar a falha por chamado, sem derrubar o ciclo.
+
+7. **Campo de grupo do iPaaS validado só pela resposta, não pelo efeito.** A variante do fluxo para o time de Sistemas respondia "transferido" sem de fato trocar o grupo (o campo de transferência assume o grupo do operador autenticado). Descoberto ao verificar o chamado real depois do teste; corrigido usando o campo que define o grupo explicitamente e **confirmando o grupo resultante** em um chamado de ponta a ponta.
 
 ## Resultado
 
