@@ -50,6 +50,7 @@ A matrícula do colaborador (campo já preenchido no chamado pelo RH) é usada c
 - **Categoria de sistemas:** o chamado é apenas direcionado ao time de Sistemas (Nível 1), que trata e encerra manualmente. O agente de bloqueio ignora esses chamados, pois só enxerga os que estão em Andamento no grupo de Segurança.
 - **Matrícula não encontrada, duplicada ou inválida:** nada é bloqueado. O chamado permanece em *Andamento* com o motivo registrado, e um e-mail de alerta (título `[Desligamento de Usuário] Ação manual necessária - chamado <número>`) é enviado à equipe de infraestrutura via Microsoft Graph, a partir de um segundo Maestro.
 - **Matrícula com zeros à esquerda:** a busca no AD aceita as variantes (ex.: `1652` no chamado e `01652` no AD) e só prossegue se houver exatamente uma conta correspondente.
+- **Instabilidade da API do Service Desk:** as leituras (autenticação, listagem, histórico, campos extras) são repetidas até 3 vezes, com espera de 10 s, em falhas transitórias (timeout, 429, 502, 503, 504). Erros definitivos falham de imediato, e o alerta só é enviado se as tentativas se esgotarem. A gravação que encerra o chamado não é repetida, para não duplicar interações.
 
 ## Ciclo de vida: arquivamento após 60 dias
 
