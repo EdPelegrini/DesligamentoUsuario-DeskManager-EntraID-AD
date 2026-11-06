@@ -112,6 +112,15 @@ Esse projeto envolveu bem mais troubleshooting de infraestrutura do que o espera
 - Ciclo completo sem toque manual: bloqueio em minutos e arquivamento da conta aos 60 dias
 - Superfície de ataque mínima: conta de serviço sem privilégios administrativos, permissões delegadas e auditadas
 
+## Código de exemplo
+
+Os dois scripts do caso estão na pasta [`scripts/`](scripts/), com **dados fictícios** (empresa "Aurora Agro", domínio `aurora.local`, e-mails `.example`). Códigos de categoria, grupos e campos são valores de exemplo e precisam ser ajustados ao seu ambiente. Nenhuma credencial fica nos arquivos: as chaves vêm de variáveis de ambiente ou de arquivo criptografado.
+
+| Script | O que faz |
+|---|---|
+| [`Bloqueio-AD-Desligamento.ps1`](scripts/Bloqueio-AD-Desligamento.ps1) | Agente da tarefa agendada (a cada 5 min): lê os chamados de desligamento, localiza a conta pela matrícula, bloqueia, carimba e encerra o chamado. Inclui conferência de nome, nova tentativa em falhas da API, log mensal, alerta por e-mail e fila manual quando a conta não existe |
+| [`Mover-Inativos-AD.ps1`](scripts/Mover-Inativos-AD.ps1) | Rotina diária: move para a OU de Inativos as contas desabilitadas com o carimbo há mais de 60 dias. Sem `-Executar`, apenas simula |
+
 ## Stack
 
 `PowerShell` · `Active Directory` · `Microsoft Entra ID / Entra Connect` · `Plataforma iPaaS low-code (Maestro)` · `REST API` · `Windows Task Scheduler`
