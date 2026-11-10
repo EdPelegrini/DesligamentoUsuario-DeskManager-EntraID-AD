@@ -31,6 +31,18 @@
 #
 param([switch]$TesteEmail)   # -TesteEmail: envia um e-mail de teste do alerta e sai (valida o SMTP)
 
+# --- Registro de inicializacao: mostra se o script comecou e guarda qualquer erro ANTES do log principal ---
+# (sem ele, uma falha na partida da Tarefa Agendada nao deixa rastro em lugar nenhum). Nao grava valores de chaves.
+$LogInicial = "C:\Scripts\logs\inicio-bloqueio.log"
+try {
+    if (-not (Test-Path "C:\Scripts\logs")) { New-Item -ItemType Directory -Path "C:\Scripts\logs" -Force | Out-Null }
+    Add-Content -Path $LogInicial -Value ("{0} inicio | usuario={1} | chave_operador={2} car. | chave_ambiente={3} car." -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $env:USERNAME, ("$env:AURORA_DESK_OPERADOR_API_KEY").Length, ("$env:AURORA_DESK_AMBIENTE_PUBLIC_KEY").Length)
+} catch { }
+trap {
+    try { Add-Content -Path $LogInicial -Value ("{0} ERRO FATAL: {1} | linha {2}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $_.Exception.Message, $_.InvocationInfo.ScriptLineNumber) } catch { }
+    exit 1
+}
+
 # ============================================================
 # CONFIGURACAO
 # ============================================================
@@ -238,7 +250,7 @@ function Invoke-BloqueioAD {
         $variantes = $variantes | Select-Object -Unique
     }
     $filtro = ($variantes | ForEach-Object { "EmployeeID -eq '$_'" }) -join ' -or '
-    $usuario = Get-ADUser -Filter $filtro -Properties EmployeeID, Enabled, info, DisplayName, GivenName, Surname -ErrorAction SilentlyContinue
+    $usuario = Get-ADUser -Filter $filtro -Properties EmployeeID, Enabled, info, DisplayName, GivenName, Surname, AdminCount -ErrorAction SilentlyContinue
 
     if (-not $usuario) {
         return @{ Sucesso = $false; ContaNaoEncontrada = $true; Mensagem = "Nenhuma conta encontrada no AD com EmployeeID = $Matricula (colaborador: $NomeColaborador). Verificar manualmente." }
@@ -255,18 +267,22 @@ function Invoke-BloqueioAD {
         return @{ Sucesso = $false; Mensagem = "A matricula $Matricula pertence a '$nomeAD' (conta $($usuario.SamAccountName)), mas o chamado informa '$NomeColaborador'. Bloqueio NAO executado - validar a matricula e o nome manualmente." }
     }
 
+    # Conta protegida (AdminCount=1: membro atual/antigo de grupo privilegiado): o AD substitui as permissoes delegadas
+    # (AdminSDHolder). O bloqueio e feito igual; a nota abaixo explica uma eventual negativa de acesso e fica no chamado.
+    $notaProtegida = if ($usuario.AdminCount -eq 1) { " Obs.: conta protegida (AdminCount=1) - as permissoes delegadas da conta de servico nao se aplicam a ela (AdminSDHolder)." } else { "" }
+
     if (-not $usuario.Enabled) {
         $aviso = Set-CarimboDesligamento -Usuario $usuario -CodChamado $CodChamado
-        return @{ Sucesso = $true; Mensagem = "Conta $($usuario.SamAccountName) ja estava desabilitada no AD.$aviso" }
+        return @{ Sucesso = $true; Mensagem = "Conta $($usuario.SamAccountName) ja estava desabilitada no AD.$aviso$notaProtegida" }
     }
 
     try {
         Disable-ADAccount -Identity $usuario.SamAccountName
         $aviso = Set-CarimboDesligamento -Usuario $usuario -CodChamado $CodChamado
-        return @{ Sucesso = $true; Mensagem = "Conta $($usuario.SamAccountName) desabilitada com sucesso no AD (sincroniza para o Entra ID automaticamente).$aviso" }
+        return @{ Sucesso = $true; Mensagem = "Conta $($usuario.SamAccountName) desabilitada com sucesso no AD (sincroniza para o Entra ID automaticamente).$aviso$notaProtegida" }
     }
     catch {
-        return @{ Sucesso = $false; Mensagem = "Erro ao desabilitar $($usuario.SamAccountName): $($_.Exception.Message)" }
+        return @{ Sucesso = $false; Mensagem = "Erro ao desabilitar $($usuario.SamAccountName): $($_.Exception.Message)$notaProtegida" }
     }
 }
 
@@ -358,7 +374,7 @@ function Move-ChamadoParaFilaManual {
 }
 
 function Send-AlertaEmail {
-    param([string]$CodChamado, [string]$NomeColaborador, [string]$Matricula, [string]$Motivo)
+    param([string]$CodChamado, [string]$NomeColaborador, [string]$Matricula, [string]$Motivo, [string]$Tipo = "")
 
     if (-not $AlertaChave) {
         Write-Warning "Chave do alerta nao encontrada (arquivo $AlertaChaveArquivo ou variavel AURORA_ALERTA_CHAVE) - alerta por e-mail nao enviado."
@@ -371,6 +387,7 @@ function Send-AlertaEmail {
         colaborador = $NomeColaborador
         matricula   = $Matricula
         motivo      = $Motivo
+        tipo        = $Tipo   # "encerrado" = chamado ja encerrado pela automacao, com pendencia
     } | ConvertTo-Json
 
     try {
@@ -399,6 +416,7 @@ if ($TesteEmail) {
 }
 
 if (-not $OperadorApiKey -or -not $AmbientePublicKey) {
+    try { Add-Content -Path $LogInicial -Value ("{0} ERRO: variavel de ambiente AURORA_DESK_OPERADOR_API_KEY ou AURORA_DESK_AMBIENTE_PUBLIC_KEY vazia para este usuario." -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss")) } catch { }
     Write-Error "Defina as variaveis de ambiente AURORA_DESK_OPERADOR_API_KEY e AURORA_DESK_AMBIENTE_PUBLIC_KEY antes de rodar este script."
     exit 1
 }
@@ -480,8 +498,12 @@ try {
             # chegou ao fim sem erro: zera o contador de falhas deste chamado
             if ($estado.falhas.ContainsKey($codChamado)) { $estado.falhas.Remove($codChamado); Save-Estado $estado }
 
-            if ((-not $resultado.Sucesso) -or ($resultado.Mensagem -like "*ATENCAO*")) {
+            if (-not $resultado.Sucesso) {
                 Send-AlertaEmail -CodChamado $codChamado -NomeColaborador $nomeColaborador -Matricula $matricula -Motivo $resultado.Mensagem
+            }
+            elseif ($resultado.Mensagem -like "*ATENCAO*") {
+                # bloqueio ok e chamado encerrado, mas ficou pendencia (ex.: carimbo nao gravado): e-mail com texto proprio
+                Send-AlertaEmail -CodChamado $codChamado -NomeColaborador $nomeColaborador -Matricula $matricula -Motivo $resultado.Mensagem -Tipo "encerrado"
             }
         }
         catch {
